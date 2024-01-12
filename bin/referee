@@ -1,0 +1,20 @@
+#!/usr/bin/env php
+<?php
+/** @var \Composer\Autoload\ClassLoader $loader */
+$loader = require dirname(__dir__).'/vendor/autoload.php';
+
+define("JSON_REFEREE_FILE", dirname(__dir__).'/public/referee.json');
+define("REFEREE_FILE", dirname(__dir__).'/public/referee.txt');
+
+$data = json_decode(file_get_contents(JSON_REFEREE_FILE));
+$data = array_filter($data, function ($entry){
+    return !str_starts_with($entry, '>>>-');
+});
+// Convert the array to a string with line breaks
+$fileContent = implode("\n", $data);
+
+
+// Write the content to the file
+file_put_contents(REFEREE_FILE, $fileContent);
+
+echo "File created successfully at: ".REFEREE_FILE;

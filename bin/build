@@ -1,0 +1,165 @@
+#!/usr/bin/env php
+<?php
+
+/** @var ClassLoader $loader */
+$loader = require dirname(__dir__).'/vendor/autoload.php';
+
+use Composer\Autoload\ClassLoader;
+use PhpParser\Node;
+use PhpParser\Node\Stmt\Class_;
+use PhpParser\Node\Stmt\Namespace_;
+use PhpParser\Node\Stmt\Use_;
+use PhpParser\NodeTraverser;
+use PhpParser\NodeVisitorAbstract;
+use PhpParser\ParserFactory;
+use PhpParser\PrettyPrinter\Standard;
+
+define("OUTPUT_FILE", dirname(__dir__).'/public/ide.php');
+
+define("INDEX_FILE", dirname(__dir__).'/public/index.php');
+
+class CleanUpVisitor extends NodeVisitorAbstract
+{
+    public function leaveNode(Node $node)
+    {
+        if ($node instanceof Use_ || ($node instanceof Node\Stmt\Expression && $node->expr instanceof Node\Expr\Include_)) {
+            return NodeTraverser::REMOVE_NODE;
+        }
+
+        return $node;
+    }
+}
+
+class ClassDependencyResolver
+{
+    public function resolve($classFile, &$allDependencies, ClassLoader $loader, $priority = 0)
+    {
+        if (!isset($allDependencies[$classFile])) {
+            $allDependencies[$classFile] = $priority;
+            ++$priority;
+
+            $usedClasses = $this->getUsedClassesFromFile($classFile);
+            foreach ($usedClasses as $class) {
+                $dependencyFile = $loader->findFile($class['namespace']);
+                if (!$dependencyFile) {
+                    continue;
+                }
+                $this->resolve($dependencyFile, $allDependencies, $loader, $priority + $class['priority']);
+            }
+        }
+    }
+
+    private function getUsedClassesFromFile($file)
+    {
+        $code = file_get_contents($file);
+        $parser = (new ParserFactory())->create(ParserFactory::PREFER_PHP7);
+        $stmts = $parser->parse($code);
+
+        $traverser = new NodeTraverser();
+        $visitor = new class() extends NodeVisitorAbstract {
+            public $usedClasses = [];
+            public $currentNamespace = '';
+
+            public function enterNode(Node $node)
+            {
+                if ($node instanceof Node\Stmt\Namespace_) {
+                    $this->currentNamespace = implode('\\', $node->name->getParts());
+                }
+
+                if ($node instanceof Use_) {
+                    foreach ($node->uses as $use) {
+                        $this->usedClasses[] = ['namespace' => $use->name->toString(), 'priority' => 0];
+                    }
+                }
+
+                if ($node instanceof Node\Expr\New_) {
+//                    dump($node->class->toString());
+                    $this->usedClasses[] = ['namespace' => $this->currentNamespace.'\\'.$node->class->toString(), 'priority' => 0];
+                }
+
+                if ($node instanceof Class_ && $node->extends) {
+                    foreach ($node->extends->getParts() as $part) {
+                        $this->usedClasses[] = ['namespace' => $this->currentNamespace.'\\'.$part, 'priority' => 0];
+                    }
+                }
+            }
+        };
+        $traverser->addVisitor($visitor);
+        $traverser->traverse($stmts);
+
+        return $visitor->usedClasses;
+    }
+}
+
+class CodeCombiner
+{
+    public static function combine($filePaths, $outputFile)
+    {
+        $combinedAST = new Namespace_(new Node\Name('Codingame'));
+        $allStmts = [];
+        foreach ($filePaths as $filePath) {
+            $stmts = self::getCleanedUpStmts($filePath);
+            if (INDEX_FILE === $filePath) {
+                $combinedAST->stmts = $stmts;
+            } else {
+                $allStmts = array_merge($allStmts, $stmts[0]->stmts);
+            }
+        }
+        $combinedAST->stmts = array_merge($combinedAST->stmts, $allStmts);
+        self::addDebugFunction($combinedAST);
+        $traverser = new NodeTraverser();
+        $traverser->addVisitor(new CleanUpVisitor());
+        $combinedAST = $traverser->traverse([$combinedAST]);
+
+        $code = (new Standard())->prettyPrintFile($combinedAST);
+        $linesInCode = substr_count($code, "\n");
+
+        echo "Number of lines added: $linesInCode\n";
+
+        file_put_contents($outputFile, $code);
+    }
+
+    private static function getCleanedUpStmts($filePath): array
+    {
+        $code = file_get_contents($filePath);
+        $parser = (new ParserFactory())->create(ParserFactory::PREFER_PHP7);
+        $stmts = $parser->parse($code);
+
+        $traverser = new NodeTraverser();
+        $traverser->addVisitor(new CleanUpVisitor());
+
+        return $traverser->traverse($stmts);
+    }
+
+    private static function addDebugFunction($combinedAST)
+    {
+        $debugCode = <<<'CODE'
+<?php
+/************************   Debug functions  *********************************/
+function dump($args)
+{
+    if (!Bot::DEBUG) {
+        return;
+    }
+
+    foreach (func_get_args() as $arg) {
+        error_log(var_export($arg, true));
+    }
+}
+CODE;
+
+        $parser = (new ParserFactory())->create(ParserFactory::PREFER_PHP7);
+        $stmts = $parser->parse($debugCode);
+        $combinedAST->stmts = array_merge($combinedAST->stmts, $stmts);
+    }
+}
+
+// Récupérer les dépendances pour le fichier index.php
+$allDependencies = [];
+$classDependencyResolver = new ClassDependencyResolver();
+$classDependencyResolver->resolve(INDEX_FILE, $allDependencies, $loader);
+arsort($allDependencies);
+
+$filePaths = array_keys($allDependencies);
+//dump($filePaths);
+CodeCombiner::combine($filePaths, OUTPUT_FILE);

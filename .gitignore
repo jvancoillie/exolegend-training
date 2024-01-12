@@ -1,0 +1,6 @@
+/vendor/
+/.env.local
+/.idea/
+/.php-cs-fixer.cache
+/.phpunit.result.cache
+public/ide.php
